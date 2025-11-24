@@ -1,0 +1,255 @@
+import React, { useState, useEffect, useRef } from 'react';
+import { createRoot } from 'react-dom/client';
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
+import { RGBELoader } from 'three/examples/jsm/loaders/RGBELoader.js';
+import { TextureLoader } from 'three/src/loaders/TextureLoader.js';
+import { motion, useScroll, useTransform } from 'framer-motion';
+import gsap from 'gsap';
+import { ScrollTrigger } from 'gsap/ScrollTrigger';
+import {
+  Plane, Calendar, MapPin, Coffee, Wind, Waves,
+  ArrowRight, Star, ChevronDown, RefreshCw, Activity,
+  Sun, Moon, Umbrella, Camera, Music
+} from 'lucide-react';
+import { initializeApp } from 'firebase/app';
+import {
+  getFirestore, doc, onSnapshot, updateDoc, setDoc, getDoc
+} from 'firebase/firestore';
+import { getAuth, signInAnonymously, onAuthStateChanged, signInWithCustomToken } from 'firebase/auth';
+
+gsap.registerPlugin(ScrollTrigger);
+
+// --- FIREBASE SETUP ---
+const firebaseConfig = JSON.parse(__firebase_config);
+const app = initializeApp(firebaseConfig);
+const auth = getAuth(app);
+const db = getFirestore(app);
+const appId = typeof __app_id !== 'undefined' ? __app_id : 'yorke-family-trip';
+
+// --- SEED DATA ---
+const SEED_DATA = {
+  flights: [
+    { id: 'f1', from: 'YYZ', to: 'YVR', airline: 'Air Canada', flightNum: 'AC123', time: '08:00 AM', status: 'On Time', date: 'Dec 20', gate: 'D22' },
+    { id: 'f2', from: 'YVR', to: 'HNL', airline: 'Air Canada', flightNum: 'AC584', time: '01:30 PM', status: 'Scheduled', date: 'Dec 20', gate: 'E5' },
+  ],
+  itinerary: [
+    { day: 1, date: 'Dec 20', title: 'Arrival in Paradise', activities: [{ text: 'Land in Honolulu', type: 'transport' }, { text: 'Check into Halekulani', type: 'hotel' }], notes: 'Leis booked for arrival.' },
+    { day: 2, date: 'Dec 21', title: 'North Shore Surf', activities: [{ text: 'Surf Lesson @ 9AM', type: 'activity' }, { text: 'Giovanni\'s Shrimp', type: 'food' }], notes: 'Bring GoPros.' },
+    { day: 3, date: 'Dec 22', title: 'Pearl Harbor', activities: [{ text: 'Arizona Memorial', type: 'culture' }, { text: 'Sunset Catamaran', type: 'chill' }], notes: 'White attire for boat.' },
+    { day: 4, date: 'Dec 23', title: 'Jungle Hike', activities: [{ text: 'Manoa Falls', type: 'activity' }, { text: 'Acai Bowls', type: 'food' }], notes: 'Muddy trails expected.' },
+    { day: 5, date: 'Dec 24', title: 'Christmas Eve Luau', activities: [{ text: 'Paradise Cove Luau', type: 'culture' }, { text: 'Mai Tais on the Beach', type: 'chill' }], notes: 'Wear floral shirts.' },
+  ]
+};
+
+const seedData = async (userId) => {
+  const docRef = doc(db, 'artifacts', appId, 'public', 'data', 'itineraries', 'yorke_trip');
+  const snap = await getDoc(docRef);
+  if (!snap.exists()) await setDoc(docRef, SEED_DATA);
+};
+
+// --- CINEMATIC 3D SCENE ---
+const CinematicBackground = ({ scrollYProgress }) => {
+  const containerRef = useRef(null);
+
+  useEffect(() => {
+    if (!containerRef.current) return;
+
+    const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    renderer.toneMappingExposure = 1.2;
+    containerRef.current.appendChild(renderer.domElement);
+
+    const scene = new THREE.Scene();
+
+    // Camera
+    const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 100);
+    camera.position.set(0, 0, 8);
+
+    // Lights
+    const ambientLight = new THREE.AmbientLight(0xffffff, 0.5);
+    scene.add(ambientLight);
+    const directionalLight = new THREE.DirectionalLight(0xffffff, 3);
+    directionalLight.position.set(5, 10, 5);
+    scene.add(directionalLight);
+
+    // Loaders
+    const gltfLoader = new GLTFLoader();
+    const rgbeLoader = new RGBELoader();
+    const texLoader = new TextureLoader();
+
+    // --- Christmas Ornament ---
+    let ornament;
+    gltfLoader.load('/assets/models/christmas_ornament.glb', (gltf) => {
+      ornament = gltf.scene;
+      ornament.scale.set(2,2,2);
+      ornament.position.set(0,0,0);
+      scene.add(ornament);
+    });
+
+    // --- Palm Tree for Hawaii ---
+    let palm;
+    gltfLoader.load('/assets/models/palmtree.glb', (gltf) => {
+      palm = gltf.scene;
+      palm.position.set(2,-2,-3);
+      palm.scale.set(1.5,1.5,1.5);
+      palm.visible = false;
+      scene.add(palm);
+    });
+
+    // --- Snowflake Particles ---
+    const snowTex = texLoader.load('/assets/textures/snowflake.png');
+    const snowGeo = new THREE.BufferGeometry();
+    const snowCount = 1000;
+    const snowPos = new Float32Array(snowCount * 3);
+    for(let i=0;i<snowCount*3;i++) snowPos[i] = (Math.random()-0.5)*20;
+    snowGeo.setAttribute('position', new THREE.BufferAttribute(snowPos,3));
+    const snowMat = new THREE.PointsMaterial({
+      size: 0.1, map: snowTex, transparent: true, blending: THREE.AdditiveBlending
+    });
+    const snow = new THREE.Points(snowGeo, snowMat);
+    scene.add(snow);
+
+    // --- HDRI environments ---
+    let snowHDRI, beachHDRI;
+    rgbeLoader.load('/assets/hdri/snowy.hdr', (tex) => {
+      tex.mapping = THREE.EquirectangularReflectionMapping;
+      snowHDRI = tex;
+      scene.environment = snowHDRI;
+    });
+    rgbeLoader.load('/assets/hdri/beach.hdr', (tex) => {
+      tex.mapping = THREE.EquirectangularReflectionMapping;
+      beachHDRI = tex;
+    });
+
+    // --- Animate Scroll ---
+    const clock = new THREE.Clock();
+    let animId;
+
+    const animate = () => {
+      const t = clock.getElapsedTime();
+      const scroll = scrollYProgress.get(); // 0-1
+
+      // Snow → Hawaii Transition
+      if(ornament){
+        ornament.rotation.y = t*0.2;
+        ornament.position.y = THREE.MathUtils.lerp(0,3,scroll);
+        ornament.scale.setScalar(THREE.MathUtils.lerp(2,0.5,scroll));
+        ornament.visible = scroll < 0.5;
+      }
+      if(palm) {
+        palm.visible = scroll > 0.5;
+      }
+
+      // Snow particles fade
+      snow.material.opacity = THREE.MathUtils.lerp(1,0,scroll);
+
+      // Lights color transition
+      directionalLight.color.lerpColors(new THREE.Color(0xe2e8f0), new THREE.Color(0xffb300), scroll);
+      ambientLight.color.lerpColors(new THREE.Color(0xffffff), new THREE.Color(0xfff1d0), scroll);
+
+      // HDRI swap
+      if(scroll > 0.5 && beachHDRI) scene.environment = beachHDRI;
+      else if(snowHDRI) scene.environment = snowHDRI;
+
+      renderer.render(scene,camera);
+      animId = requestAnimationFrame(animate);
+    };
+    animate();
+
+    const handleResize = () => {
+      camera.aspect = window.innerWidth/window.innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(window.innerWidth,window.innerHeight);
+    };
+    window.addEventListener('resize',handleResize);
+    return () => {
+      window.removeEventListener('resize',handleResize);
+      cancelAnimationFrame(animId);
+      if(containerRef.current) containerRef.current.innerHTML = '';
+    };
+  }, [scrollYProgress]);
+
+  return <div ref={containerRef} className="fixed inset-0 z-0 pointer-events-none bg-black" />;
+};
+
+// --- MAIN APP ---
+export default function YorkeHawaiiPlanner() {
+  const [user,setUser] = useState(null);
+  const [tripData,setTripData] = useState(null);
+  const [loading,setLoading] = useState(true);
+  const [simulating,setSimulating] = useState(false);
+
+  const { scrollYProgress } = useScroll();
+
+  useEffect(() => {
+    const init = async () => {
+      try {
+        if(!auth.currentUser){
+          if(typeof __initial_auth_token !== 'undefined' && __initial_auth_token) await signInWithCustomToken(auth,__initial_auth_token);
+          else await signInAnonymously(auth);
+        }
+      } catch(e){ console.error(e); }
+    }
+    init();
+
+    const unsubAuth = onAuthStateChanged(auth, async (u) => {
+      setUser(u);
+      if(u){
+        await seedData(u.uid);
+        const unsubData = onSnapshot(doc(db,'artifacts',appId,'public','data','itineraries','yorke_trip'), (doc)=>{
+          if(doc.exists()) setTripData(doc.data());
+          setLoading(false);
+        });
+        return ()=> unsubData();
+      }
+    });
+    return ()=> unsubAuth();
+  },[]);
+
+  useEffect(()=>{
+    if(!simulating || !user || !tripData) return;
+    const interval = setInterval(async()=>{
+      const flights = [...tripData.flights];
+      const idx = Math.floor(Math.random()*flights.length);
+      const statuses = ['On Time','Delayed','Boarding','Gate Change','In Air'];
+      flights[idx] = {...flights[idx], status: statuses[Math.floor(Math.random()*statuses.length)]};
+      await updateDoc(doc(db,'artifacts',appId,'public','data','itineraries','yorke_trip'),{flights});
+    },4000);
+    return ()=> clearInterval(interval);
+  },[simulating,user,tripData]);
+
+  if(loading) return <div className="h-screen w-full flex items-center justify-center bg-black text-white">Loading...</div>;
+
+  return (
+    <div className="relative min-h-[300vh] text-white font-sans bg-transparent overflow-x-hidden">
+      <CinematicBackground scrollYProgress={scrollYProgress}/>
+      {/* HERO & CONTENT OVERLAY */}
+      <div className="relative z-10">
+        <motion.header style={{opacity:useTransform(scrollYProgress,[0,0.2],[1,0])}} className="h-screen flex flex-col items-center justify-center text-center">
+          <h1 className="text-6xl md:text-9xl font-black tracking-tighter mb-8">YORKE HAWAII</h1>
+          <GlassCountdown targetDate="2025-12-20T08:00:00"/>
+        </motion.header>
+        <motion.main className="px-4 md:px-8 max-w-7xl mx-auto pb-32">
+          {/* Flights Section */}
+          <SectionHeader title="Transit" subtitle="Live Flight Data" action={
+            <button onClick={()=>setSimulating(!simulating)}>Simulate</button>
+          }/>
+          <div className="grid lg:grid-cols-2 gap-8">
+            {tripData?.flights?.map((f,i)=><FlightCard key={f.id} flight={f} idx={i}/>)}
+          </div>
+          {/* Itinerary */}
+          <SectionHeader title="Agenda" subtitle="Day by Day Breakdown"/>
+          <div className="grid md:grid-cols-2 lg:grid-cols-4 gap-6">
+            {tripData?.itinerary?.map((d,i)=><ItineraryCard key={i} day={d} idx={i}/>)}
+          </div>
+        </motion.main>
+      </div>
+    </div>
+  );
+}
+
+// --- UI COMPONENTS (FlightCard, ItineraryCard, GlassCountdown, etc.) ---
+// Keep your previous implementations for FlightCard, ItineraryCard, GlassCountdown, StatusBadge, getIcon...
